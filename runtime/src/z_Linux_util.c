@@ -18,6 +18,7 @@
 #include "kmp_itt.h"
 #include "kmp_str.h"
 #include "kmp_i18n.h"
+#include "kmp_lock.h"
 #include "kmp_io.h"
 #include "kmp_stats.h"
 #include "kmp_wait_release.h"
@@ -34,7 +35,7 @@
 
 #if KMP_OS_LINUX && !KMP_OS_CNK
 # include <sys/sysinfo.h>
-# if KMP_OS_LINUX && (KMP_ARCH_X86 || KMP_ARCH_X86_64 || KMP_ARCH_ARM || KMP_ARCH_AARCH64)
+# if KMP_USE_FUTEX
 // We should really include <futex.h>, but that causes compatibility problems on different
 // Linux* OS distributions that either require that you include (or break when you try to include)
 // <pci/types.h>.
@@ -422,7 +423,7 @@ __kmp_affinity_determine_capable(const char *env_var)
 /* ------------------------------------------------------------------------ */
 /* ------------------------------------------------------------------------ */
 
-#if KMP_OS_LINUX && (KMP_ARCH_X86 || KMP_ARCH_X86_64 || KMP_ARCH_ARM || KMP_ARCH_AARCH64) && !KMP_OS_CNK
+#if KMP_USE_FUTEX && !KMP_OS_CNK
 
 int
 __kmp_futex_determine_capable()
@@ -439,7 +440,7 @@ __kmp_futex_determine_capable()
     return retval;
 }
 
-#endif // KMP_OS_LINUX && (KMP_ARCH_X86 || KMP_ARCH_X86_64 || KMP_ARCH_ARM) && !KMP_OS_CNK
+#endif // KMP_USE_FUTEX && !KMP_OS_CNK
 
 /* ------------------------------------------------------------------------ */
 /* ------------------------------------------------------------------------ */
@@ -1005,10 +1006,10 @@ __kmp_create_worker( int gtid, kmp_info_t *th, size_t stack_size )
         __kmp_msg(kmp_ms_fatal, KMP_MSG( CantSetWorkerState ), KMP_ERR( status ), __kmp_msg_null);
     }; // if
 
-    /* Set stack size for this thread now. 
+    /* Set stack size for this thread now.
      * The multiple of 2 is there because on some machines, requesting an unusual stacksize
      * causes the thread to have an offset before the dummy alloca() takes place to create the
-     * offset.  Since we want the user to have a sufficient stacksize AND support a stack offset, we 
+     * offset.  Since we want the user to have a sufficient stacksize AND support a stack offset, we
      * alloca() twice the offset so that the upcoming alloca() does not eliminate any premade
      * offset, and also gives the user the stack space they requested for all threads */
     stack_size += gtid * __kmp_stkoffset * 2;
@@ -2574,18 +2575,18 @@ __kmp_get_load_balance( int max )
 
 #endif // USE_LOAD_BALANCE
 
-#if !(KMP_ARCH_X86 || KMP_ARCH_X86_64 || KMP_MIC || (KMP_OS_LINUX && KMP_ARCH_AARCH64))
+#if !(KMP_ARCH_X86 || KMP_ARCH_X86_64 || KMP_MIC || (KMP_OS_LINUX && KMP_ARCH_AARCH64) || KMP_ARCH_PPC64)
 
 // we really only need the case with 1 argument, because CLANG always build
 // a struct of pointers to shared variables referenced in the outlined function
 int
 __kmp_invoke_microtask( microtask_t pkfn,
                         int gtid, int tid,
-                        int argc, void *p_argv[] 
+                        int argc, void *p_argv[]
 #if OMPT_SUPPORT
                         , void **exit_frame_ptr
 #endif
-) 
+)
 {
 #if OMPT_SUPPORT
   *exit_frame_ptr = __builtin_frame_address(0);

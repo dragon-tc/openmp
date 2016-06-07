@@ -21,6 +21,7 @@
 #include "kmp_str.h"
 #include "kmp_settings.h"
 #include "kmp_i18n.h"
+#include "kmp_lock.h"
 #include "kmp_io.h"
 
 static int __kmp_env_toPrint( char const * name, int flag );
@@ -1195,6 +1196,23 @@ __kmp_stg_print_max_task_priority(kmp_str_buf_t *buffer, char const *name, void 
     __kmp_stg_print_int(buffer, name, __kmp_max_task_priority);
 } // __kmp_stg_print_max_task_priority
 #endif // OMP_41_ENABLED
+
+// -------------------------------------------------------------------------------------------------
+// KMP_DISP_NUM_BUFFERS
+// -------------------------------------------------------------------------------------------------
+static void
+__kmp_stg_parse_disp_buffers( char const * name, char const * value, void * data ) {
+    if ( TCR_4(__kmp_init_serial) ) {
+        KMP_WARNING( EnvSerialWarn, name );
+        return;
+    }   // read value before serial initialization only
+    __kmp_stg_parse_int( name, value, 1, KMP_MAX_NTH, & __kmp_dispatch_num_buffers );
+} // __kmp_stg_parse_disp_buffers
+
+static void
+__kmp_stg_print_disp_buffers( kmp_str_buf_t * buffer, char const * name, void * data ) {
+    __kmp_stg_print_int( buffer, name, __kmp_dispatch_num_buffers );
+} // __kmp_stg_print_disp_buffers
 
 #if KMP_NESTED_HOT_TEAMS
 // -------------------------------------------------------------------------------------------------
@@ -3924,7 +3942,7 @@ __kmp_stg_parse_lock_kind( char const * name, char const * value, void * data ) 
         __kmp_user_lock_kind = lk_tas;
         KMP_STORE_LOCK_SEQ(tas);
     }
-#if KMP_OS_LINUX && (KMP_ARCH_X86 || KMP_ARCH_X86_64 || KMP_ARCH_ARM)
+#if KMP_USE_FUTEX
     else if ( __kmp_str_match( "futex", 1, value ) ) {
         if ( __kmp_futex_determine_capable() ) {
             __kmp_user_lock_kind = lk_futex;
@@ -3998,7 +4016,7 @@ __kmp_stg_print_lock_kind( kmp_str_buf_t * buffer, char const * name, void * dat
         value = "tas";
         break;
 
-#if KMP_OS_LINUX && (KMP_ARCH_X86 || KMP_ARCH_X86_64)
+#if KMP_USE_FUTEX
         case lk_futex:
         value = "futex";
         break;
@@ -4645,6 +4663,7 @@ static kmp_setting_t __kmp_stg_table[] = {
 #endif
     { "OMP_THREAD_LIMIT",                  __kmp_stg_parse_all_threads,        __kmp_stg_print_all_threads,        NULL, 0, 0 },
     { "OMP_WAIT_POLICY",                   __kmp_stg_parse_wait_policy,        __kmp_stg_print_wait_policy,        NULL, 0, 0 },
+    { "KMP_DISP_NUM_BUFFERS",              __kmp_stg_parse_disp_buffers,       __kmp_stg_print_disp_buffers,       NULL, 0, 0 },
 #if KMP_NESTED_HOT_TEAMS
     { "KMP_HOT_TEAMS_MAX_LEVEL",           __kmp_stg_parse_hot_teams_level,    __kmp_stg_print_hot_teams_level,    NULL, 0, 0 },
     { "KMP_HOT_TEAMS_MODE",                __kmp_stg_parse_hot_teams_mode,     __kmp_stg_print_hot_teams_mode,     NULL, 0, 0 },
