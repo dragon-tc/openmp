@@ -2,7 +2,6 @@
  * kmp_global.cpp -- KPTS global variables for runtime support library
  */
 
-
 //===----------------------------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
@@ -11,7 +10,6 @@
 // Source Licenses. See LICENSE.txt for details.
 //
 //===----------------------------------------------------------------------===//
-
 
 #include "kmp.h"
 #include "kmp_affinity.h"
@@ -126,7 +124,6 @@ char const *__kmp_barrier_pattern_name[bp_last_bar] = {"linear", "tree",
 
 int __kmp_allThreadsSpecified = 0;
 size_t __kmp_align_alloc = CACHE_LINE;
-
 
 int __kmp_generate_warnings = kmp_warnings_low;
 int __kmp_reserve_warn = 0;
@@ -304,6 +301,10 @@ kmp_tasking_mode_t __kmp_tasking_mode = tskm_task_teams;
 #if OMP_45_ENABLED
 kmp_int32 __kmp_max_task_priority = 0;
 kmp_uint64 __kmp_taskloop_min_tasks = 0;
+#endif
+
+#if OMP_50_ENABLED && OMPT_SUPPORT
+char const *__kmp_tool_libraries = NULL;
 #endif
 
 /* This check ensures that the compiler is passing the correct data type for the
