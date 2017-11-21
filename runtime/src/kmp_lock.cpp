@@ -1468,8 +1468,8 @@ int __kmp_release_queuing_lock(kmp_queuing_lock_t *lck, kmp_int32 gtid) {
 
         /* try (h,h)->(-1,0) */
         dequeued = KMP_COMPARE_AND_STORE_REL64(
-            RCAST(kmp_int64 *, CCAST(kmp_int32 *, tail_id_p)),
-            KMP_PACK_64(head, head), KMP_PACK_64(-1, 0));
+            RCAST(volatile kmp_int64 *, tail_id_p), KMP_PACK_64(head, head),
+            KMP_PACK_64(-1, 0));
 #ifdef DEBUG_QUEUING_LOCKS
         TRACE_LOCK(gtid + 1, "rel deq: (h,h)->(-1,0)");
 #endif
@@ -2289,8 +2289,8 @@ static inline bool __kmp_is_drdpa_lock_nestable(kmp_drdpa_lock_t *lck) {
 
 __forceinline static int
 __kmp_acquire_drdpa_lock_timed_template(kmp_drdpa_lock_t *lck, kmp_int32 gtid) {
-  kmp_uint64 ticket = KMP_TEST_THEN_INC64(
-      RCAST(kmp_int64 *, CCAST(kmp_uint64 *, &lck->lk.next_ticket)));
+  kmp_uint64 ticket =
+      KMP_TEST_THEN_INC64(RCAST(volatile kmp_int64 *, &lck->lk.next_ticket));
   kmp_uint64 mask = TCR_8(lck->lk.mask); // volatile load
   volatile struct kmp_base_drdpa_lock::kmp_lock_poll *polls = lck->lk.polls;
 
@@ -3061,11 +3061,12 @@ kmp_indirect_lock_t *__kmp_allocate_indirect_lock(void **user_lock,
     if (idx == __kmp_i_lock_table.size) {
       // Double up the space for block pointers
       int row = __kmp_i_lock_table.size / KMP_I_LOCK_CHUNK;
-      kmp_indirect_lock_t **old_table = __kmp_i_lock_table.table;
-      __kmp_i_lock_table.table = (kmp_indirect_lock_t **)__kmp_allocate(
+      kmp_indirect_lock_t **new_table = (kmp_indirect_lock_t **)__kmp_allocate(
           2 * row * sizeof(kmp_indirect_lock_t *));
-      KMP_MEMCPY(__kmp_i_lock_table.table, old_table,
+      KMP_MEMCPY(new_table, __kmp_i_lock_table.table,
                  row * sizeof(kmp_indirect_lock_t *));
+      kmp_indirect_lock_t **old_table = __kmp_i_lock_table.table;
+      __kmp_i_lock_table.table = new_table;
       __kmp_free(old_table);
       // Allocate new objects in the new blocks
       for (int i = row; i < 2 * row; ++i)
