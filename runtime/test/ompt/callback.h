@@ -5,6 +5,9 @@
 #include <ompt.h>
 #include "ompt-signal.h"
 
+// Used to detect architecture
+#include "../../src/kmp_platform.h"
+
 static const char* ompt_thread_type_t_values[] = {
   NULL,
   "ompt_thread_initial",
@@ -50,7 +53,7 @@ static void print_ids(int level)
   int exists_task = ompt_get_task_info(level, NULL, &task_data, &frame, &parallel_data, NULL);
   if (frame)
   {
-    printf("%" PRIu64 ": task level %d: parallel_id=%" PRIu64 ", task_id=%" PRIu64 ", exit_frame=%p, reenter_frame=%p\n", ompt_get_thread_data()->value, level, exists_task ? parallel_data->value : 0, exists_task ? task_data->value : 0, frame->exit_runtime_frame, frame->reenter_runtime_frame);
+    printf("%" PRIu64 ": task level %d: parallel_id=%" PRIu64 ", task_id=%" PRIu64 ", exit_frame=%p, reenter_frame=%p\n", ompt_get_thread_data()->value, level, exists_task ? parallel_data->value : 0, exists_task ? task_data->value : 0, frame->exit_frame, frame->enter_frame);
   }
   else
     printf("%" PRIu64 ": task level %d: parallel_id=%" PRIu64 ", task_id=%" PRIu64 ", frame=%p\n", ompt_get_thread_data()->value, level, exists_task ? parallel_data->value : 0, exists_task ? task_data->value : 0, frame);
@@ -61,21 +64,74 @@ do {\
   printf("%" PRIu64 ": __builtin_frame_address(%d)=%p\n", ompt_get_thread_data()->value, level, __builtin_frame_address(level));\
 } while(0)
 
-#define print_current_address(id)\
-{}              /* Empty block between "#pragma omp ..." and __asm__ statement as a workaround for icc bug */ \
-__asm__("nop"); /* provide an instruction as jump target (compiler would insert an instruction if label is target of a jmp ) */ \
-ompt_label_##id:\
-    printf("%" PRIu64 ": current_address=%p or %p\n", ompt_get_thread_data()->value, (char*)(&& ompt_label_##id)-1, (char*)(&& ompt_label_##id)-4) 
-    /* "&& label" returns the address of the label (GNU extension); works with gcc, clang, icc */
-    /* for void-type runtime function, the label is after the nop (-1), for functions with return value, there is a mov instruction before the label (-4) */
 
-#define print_fuzzy_address(id)\
-{}              /* Empty block between "#pragma omp ..." and __asm__ statement as a workaround for icc bug */ \
-__asm__("nop"); /* provide an instruction as jump target (compiler would insert an instruction if label is target of a jmp ) */ \
-ompt_label_##id:\
-    printf("%" PRIu64 ": fuzzy_address=0x%lx or 0x%lx\n", ompt_get_thread_data()->value, ((uint64_t)(char*)(&& ompt_label_##id))/256-1, ((uint64_t)(char*)(&& ompt_label_##id))/256) 
-    /* "&& label" returns the address of the label (GNU extension); works with gcc, clang, icc */
-    /* for void-type runtime function, the label is after the nop (-1), for functions with return value, there is a mov instruction before the label (-4) */
+// This macro helps to define a label at the current position that can be used
+// to get the current address in the code.
+//
+// For print_current_address():
+//   To reliably determine the offset between the address of the label and the
+//   actual return address, we insert a NOP instruction as a jump target as the
+//   compiler would otherwise insert an instruction that we can't control. The
+//   instruction length is target dependent and is explained below.
+//
+// (The empty block between "#pragma omp ..." and the __asm__ statement is a
+// workaround for a bug in the Intel Compiler.)
+#define define_ompt_label(id) \
+  {} \
+  __asm__("nop"); \
+ompt_label_##id:
+
+// This macro helps to get the address of a label that is inserted by the above
+// macro define_ompt_label(). The address is obtained with a GNU extension
+// (&&label) that has been tested with gcc, clang and icc.
+#define get_ompt_label_address(id) (&& ompt_label_##id)
+
+// This macro prints the exact address that a previously called runtime function
+// returns to.
+#define print_current_address(id) \
+  define_ompt_label(id) \
+  print_possible_return_addresses(get_ompt_label_address(id))
+
+#if KMP_ARCH_X86 || KMP_ARCH_X86_64
+// On X86 the NOP instruction is 1 byte long. In addition, the comiler inserts
+// a MOV instruction for non-void runtime functions which is 3 bytes long.
+#define print_possible_return_addresses(addr) \
+  printf("%" PRIu64 ": current_address=%p or %p for non-void functions\n", \
+         ompt_get_thread_data()->value, ((char *)addr) - 1, ((char *)addr) - 4)
+#elif KMP_ARCH_PPC64
+// On Power the NOP instruction is 4 bytes long. In addition, the compiler
+// inserts an LD instruction which accounts for another 4 bytes. In contrast to
+// X86 this instruction is always there, even for void runtime functions.
+#define print_possible_return_addresses(addr) \
+  printf("%" PRIu64 ": current_address=%p\n", ompt_get_thread_data()->value, \
+         ((char *)addr) - 8)
+#else
+#error Unsupported target architecture, cannot determine address offset!
+#endif
+
+
+// This macro performs a somewhat similar job to print_current_address(), except
+// that it discards a certain number of nibbles from the address and only prints
+// the most significant bits / nibbles. This can be used for cases where the
+// return address can only be approximated.
+//
+// To account for overflows (ie the most significant bits / nibbles have just
+// changed as we are a few bytes above the relevant power of two) the addresses
+// of the "current" and of the "previous block" are printed.
+#define print_fuzzy_address(id) \
+  define_ompt_label(id) \
+  print_fuzzy_address_blocks(get_ompt_label_address(id))
+
+// If you change this define you need to adapt all capture patterns in the tests
+// to include or discard the new number of nibbles!
+#define FUZZY_ADDRESS_DISCARD_NIBBLES 2
+#define FUZZY_ADDRESS_DISCARD_BYTES (1 << ((FUZZY_ADDRESS_DISCARD_NIBBLES) * 4))
+#define print_fuzzy_address_blocks(addr) \
+  printf("%" PRIu64 ": fuzzy_address=0x%" PRIx64 " or 0x%" PRIx64 " (%p)\n", \
+  ompt_get_thread_data()->value, \
+  ((uint64_t)addr) / FUZZY_ADDRESS_DISCARD_BYTES - 1, \
+  ((uint64_t)addr) / FUZZY_ADDRESS_DISCARD_BYTES, addr)
+
 
 static void format_task_type(int type, char* buffer)
 {
@@ -308,7 +364,7 @@ on_ompt_callback_cancel(
     second_flag_value = ompt_cancel_flag_t_values[5];
   else if(flags & ompt_cancel_discarded_task)
     second_flag_value = ompt_cancel_flag_t_values[6];
-    
+
   printf("%" PRIu64 ": ompt_event_cancel: task_data=%" PRIu64 ", flags=%s|%s=%" PRIu32 ", codeptr_ra=%p\n", ompt_get_thread_data()->value, task_data->value, first_flag_value, second_flag_value, flags,  codeptr_ra);
 }
 
@@ -477,46 +533,46 @@ on_ompt_callback_master(
 
 static void
 on_ompt_callback_parallel_begin(
-  ompt_data_t *parent_task_data,
-  const ompt_frame_t *parent_task_frame,
+  ompt_data_t *encountering_task_data,
+  const ompt_frame_t *encountering_task_frame,
   ompt_data_t* parallel_data,
   uint32_t requested_team_size,
   ompt_invoker_t invoker,
   const void *codeptr_ra)
 {
   if(parallel_data->ptr)
-    printf("%s\n", "0: parallel_data initially not null");
+    printf("0: parallel_data initially not null\n");
   parallel_data->value = ompt_get_unique_id();
-  printf("%" PRIu64 ": ompt_event_parallel_begin: parent_task_id=%" PRIu64 ", parent_task_frame.exit=%p, parent_task_frame.reenter=%p, parallel_id=%" PRIu64 ", requested_team_size=%" PRIu32 ", codeptr_ra=%p, invoker=%d\n", ompt_get_thread_data()->value, parent_task_data->value, parent_task_frame->exit_runtime_frame, parent_task_frame->reenter_runtime_frame, parallel_data->value, requested_team_size, codeptr_ra, invoker);
+  printf("%" PRIu64 ": ompt_event_parallel_begin: parent_task_id=%" PRIu64 ", parent_task_frame.exit=%p, parent_task_frame.reenter=%p, parallel_id=%" PRIu64 ", requested_team_size=%" PRIu32 ", codeptr_ra=%p, invoker=%d\n", ompt_get_thread_data()->value, encountering_task_data->value, encountering_task_frame->exit_frame, encountering_task_frame->enter_frame, parallel_data->value, requested_team_size, codeptr_ra, invoker);
 }
 
 static void
 on_ompt_callback_parallel_end(
   ompt_data_t *parallel_data,
-  ompt_data_t *task_data,
+  ompt_data_t *encountering_task_data,
   ompt_invoker_t invoker,
   const void *codeptr_ra)
 {
-  printf("%" PRIu64 ": ompt_event_parallel_end: parallel_id=%" PRIu64 ", task_id=%" PRIu64 ", invoker=%d, codeptr_ra=%p\n", ompt_get_thread_data()->value, parallel_data->value, task_data->value, invoker, codeptr_ra);
+  printf("%" PRIu64 ": ompt_event_parallel_end: parallel_id=%" PRIu64 ", task_id=%" PRIu64 ", invoker=%d, codeptr_ra=%p\n", ompt_get_thread_data()->value, parallel_data->value, encountering_task_data->value, invoker, codeptr_ra);
 }
 
 static void
 on_ompt_callback_task_create(
-    ompt_data_t *parent_task_data,     /* id of parent task            */
-    const ompt_frame_t *parent_frame,  /* frame data for parent task   */
-    ompt_data_t* new_task_data,        /* id of created task           */
+    ompt_data_t *encountering_task_data,
+    const ompt_frame_t *encountering_task_frame,
+    ompt_data_t* new_task_data,
     int type,
     int has_dependences,
-    const void *codeptr_ra)               /* pointer to outlined function */
+    const void *codeptr_ra)
 {
   if(new_task_data->ptr)
-    printf("%s\n", "0: new_task_data initially not null");
+    printf("0: new_task_data initially not null\n");
   new_task_data->value = ompt_get_unique_id();
   char buffer[2048];
 
   format_task_type(type, buffer);
 
-  //there is no paralllel_begin callback for implicit parallel region
+  //there is no parallel_begin callback for implicit parallel region
   //thus it is initialized in initial task
   if(type & ompt_task_initial)
   {
@@ -527,7 +583,7 @@ on_ompt_callback_task_create(
     parallel_data->value = ompt_get_unique_id();
   }
 
-  printf("%" PRIu64 ": ompt_event_task_create: parent_task_id=%" PRIu64 ", parent_task_frame.exit=%p, parent_task_frame.reenter=%p, new_task_id=%" PRIu64 ", codeptr_ra=%p, task_type=%s=%d, has_dependences=%s\n", ompt_get_thread_data()->value, parent_task_data ? parent_task_data->value : 0, parent_frame ? parent_frame->exit_runtime_frame : NULL, parent_frame ? parent_frame->reenter_runtime_frame : NULL, new_task_data->value, codeptr_ra, buffer, type, has_dependences ? "yes" : "no");
+  printf("%" PRIu64 ": ompt_event_task_create: parent_task_id=%" PRIu64 ", parent_task_frame.exit=%p, parent_task_frame.reenter=%p, new_task_id=%" PRIu64 ", codeptr_ra=%p, task_type=%s=%d, has_dependences=%s\n", ompt_get_thread_data()->value, encountering_task_data ? encountering_task_data->value : 0, encountering_task_frame ? encountering_task_frame->exit_frame : NULL, encountering_task_frame ? encountering_task_frame->enter_frame : NULL, new_task_data->value, codeptr_ra, buffer, type, has_dependences ? "yes" : "no");
 }
 
 static void
@@ -587,7 +643,7 @@ on_ompt_callback_control_tool(
 {
   ompt_frame_t* omptTaskFrame;
   ompt_get_task_info(0, NULL, (ompt_data_t**) NULL, &omptTaskFrame, NULL, NULL);
-  printf("%" PRIu64 ": ompt_event_control_tool: command=%" PRIu64 ", modifier=%" PRIu64 ", arg=%p, codeptr_ra=%p, current_task_frame.exit=%p, current_task_frame.reenter=%p \n", ompt_get_thread_data()->value, command, modifier, arg, codeptr_ra, omptTaskFrame->exit_runtime_frame, omptTaskFrame->reenter_runtime_frame);
+  printf("%" PRIu64 ": ompt_event_control_tool: command=%" PRIu64 ", modifier=%" PRIu64 ", arg=%p, codeptr_ra=%p, current_task_frame.exit=%p, current_task_frame.reenter=%p \n", ompt_get_thread_data()->value, command, modifier, arg, codeptr_ra, omptTaskFrame->exit_frame, omptTaskFrame->enter_frame);
   return 0; //success
 }
 
@@ -603,7 +659,7 @@ do{                                                           \
 
 int ompt_initialize(
   ompt_function_lookup_t lookup,
-  ompt_fns_t* fns)
+  ompt_data_t *tool_data)
 {
   ompt_set_callback = (ompt_set_callback_t) lookup("ompt_set_callback");
   ompt_get_task_info = (ompt_get_task_info_t) lookup("ompt_get_task_info");
@@ -646,15 +702,15 @@ int ompt_initialize(
   return 1; //success
 }
 
-void ompt_finalize(ompt_fns_t* fns)
+void ompt_finalize(ompt_data_t *tool_data)
 {
   printf("0: ompt_event_runtime_shutdown\n");
 }
 
-ompt_fns_t* ompt_start_tool(
+ompt_start_tool_result_t* ompt_start_tool(
   unsigned int omp_version,
   const char *runtime_version)
 {
-  static ompt_fns_t ompt_fns = {&ompt_initialize,&ompt_finalize};
-  return &ompt_fns;
+  static ompt_start_tool_result_t ompt_start_tool_result = {&ompt_initialize,&ompt_finalize, 0};
+  return &ompt_start_tool_result;
 }
